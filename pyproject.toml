@@ -1,0 +1,39 @@
+[tool.poetry]
+name        = "latency-bench"
+version     = "0.1.0"
+description = "Benchmark batch-inference latency of encoder models across hardware."
+authors     = ["Your Name <you@example.com>"]
+packages    = [{ include = "latency_bench", from = "src" }]
+
+[tool.poetry.dependencies]
+python          = ">=3.10,<3.13"
+
+# ─── Core, hardware-agnostic ───
+transformers    = "^4.45"
+datasets        = "^2.19"
+torch           = "^2.2"            # CPU/MPS; GPU wheels installed manually
+accelerate      = "^0.30"
+optimum         = "^1.19"
+onnxruntime     = {version = "^1.22", optional = true}
+rich            = "^13.7"
+tqdm            = "^4.66"
+psutil          = "^5.9"
+py-cpuinfo      = "^9.0"
+
+# ─── Dev helpers (optional) ───
+black           = {version = "^24.4", optional = true}
+isort           = {version = "^5.13", optional = true}
+ruff            = {version = "^0.4", optional = true}
+pre-commit      = {version = "^3.7", optional = true}
+wandb = "^0.21.0"
+
+[tool.poetry.extras]
+cpu   = ["onnxruntime"]
+mac   = ["torch", "onnxruntime"]
+gpu   = ["torch", "onnxruntime-gpu"]       # install matching CUDA wheel manually
+inf1  = ["torch-neuron", "optimum-neuron"] # Inferentia v1
+inf2  = ["torch-neuronx", "optimum-neuron"]# Inferentia v2 / Trainium  ✅ fixed
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
