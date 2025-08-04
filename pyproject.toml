@@ -1,36 +1,70 @@
-# pyproject.neuron.toml  –  use ONLY on Inf2 / Trainium
-# -----------------------------------------------------
+# pyproject.toml – Merged configuration for all hardware targets
+# ----------------------------------------------------------------
 
+# Added the AWS Neuron source, which is required for Inf1/Inf2
 [[tool.poetry.source]]
 name     = "aws-neuron"
 url      = "https://pip.repos.neuron.amazonaws.com"
-priority = "supplemental"          # keep PyPI as primary; fallback to this repo
+priority = "supplemental"  # Keep PyPI as primary; fallback to this repo
 
 [tool.poetry]
-name        = "latency-bench-neuron"
+name        = "latency-bench"
+# Bumped version to reflect the merge of new Inf2 functionality
 version     = "0.2.0"
-description = "Latency-bench – Neuron runtime (Torch 1.13 + Neuron SDK 2)"
+description = "Benchmark batch-inference latency of encoder models across hardware."
 authors     = ["Your Name <you@example.com>"]
 packages    = [{ include = "latency_bench", from = "src" }]
 
 [tool.poetry.dependencies]
-python = ">=3.10,<3.13"
+python          = ">=3.10,<3.13"
 
-# — hardware-agnostic libs —
-datasets   = "^2.19"
-rich       = "^13.7"
-tqdm       = "^4.66"
-psutil     = "^5.9"
-py-cpuinfo = "^9.0"
-wandb      = "^0.21"
+# ─── Core, hardware-agnostic dependencies ───
+transformers    = "^4.45"
+datasets        = "^2.19"
+accelerate      = "^0.30"
+optimum         = "^1.19"
+rich            = "^13.7"
+tqdm            = "^4.66"
+psutil          = "^5.9"
+py-cpuinfo      = "^9.0"
+wandb           = "^0.21.0" # Moved to core dependencies for consistent logging
 
-# — Neuron stack —
-torch           = "==2.7.*"           # Torch core used by Neuron 2.x
+# ─── Dev helpers (install with 'poetry install --with dev') ───
+[tool.poetry.group.dev.dependencies]
+black           = "^24.4"
+isort           = "^5.13"
+ruff            = "^0.4"
+pre-commit      = "^3.7"
+
+# ─── Hardware-specific dependency groups ───
+# Install a group with: poetry install --with <group_name>
+# Example: poetry install --with cpu
+# Example: poetry install --with inf2
+
+[tool.poetry.group.cpu.dependencies]
+onnxruntime     = "^1.22"
+
+[tool.poetry.group.mac.dependencies]
+torch           = "^2.2"
+onnxruntime     = "^1.22"
+
+[tool.poetry.group.gpu.dependencies]
+# NOTE: Install the torch version that matches your system's CUDA version manually first
+# then run `poetry install --with gpu`
+torch           = "^2.2" 
+onnxruntime-gpu = "^1.22" # Example, ensure it matches your CUDA version
+
+[tool.poetry.group.inf1.dependencies]
+# NOTE: This is the original inf1 config; verify package versions if needed
+optimum-neuron  = "^0.0.14" # Example pin, adjust as needed
+torch-neuron    = "*"       # Loosely pinned, as it's tied to optimum-neuron
+
+# This is the new, correct configuration for Inf2, taken from your working file
+[tool.poetry.group.inf2.dependencies]
+torch           = "==2.7.*"      # Neuron 2.x requires a specific Torch series
 optimum-neuron  = {extras = ["neuronx"], version = "^0.3.0"}
-# optional explicit pin, but leaving it out is fine—Optimum installs it
-torch-neuronx   = "^2.7.0"
-
+torch-neuronx   = "^2.7.0"       # Explicitly pin for clarity and stability
 
 [build-system]
-requires = ["poetry-core"]
+requires      = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
