@@ -1,38 +1,35 @@
+# pyproject.neuron.toml  –  use ONLY on Inf2 / Trainium
+# -----------------------------------------------------
+
+[[tool.poetry.source]]
+name     = "aws-neuron"
+url      = "https://pip.repos.neuron.amazonaws.com"
+priority = "supplemental"          # keep PyPI as primary; fallback to this repo
+
 [tool.poetry]
-name        = "latency-bench"
-version     = "0.1.0"
-description = "Benchmark batch-inference latency of encoder models across hardware."
+name        = "latency-bench-neuron"
+version     = "0.2.0"
+description = "Latency-bench – Neuron runtime (Torch 1.13 + Neuron SDK 2)"
 authors     = ["Your Name <you@example.com>"]
 packages    = [{ include = "latency_bench", from = "src" }]
 
 [tool.poetry.dependencies]
-python          = ">=3.10,<3.13"
+python = ">=3.10,<3.13"
 
-# ─── Core, hardware-agnostic ───
-transformers    = "^4.45"
-datasets        = "^2.19"
-torch           = "^2.2"            # CPU/MPS; GPU wheels installed manually
-accelerate      = "^0.30"
-optimum         = "^1.19"
-onnxruntime     = {version = "^1.22", optional = true}
-rich            = "^13.7"
-tqdm            = "^4.66"
-psutil          = "^5.9"
-py-cpuinfo      = "^9.0"
+# — hardware-agnostic libs —
+datasets   = "^2.19"
+rich       = "^13.7"
+tqdm       = "^4.66"
+psutil     = "^5.9"
+py-cpuinfo = "^9.0"
+wandb      = "^0.21"
 
-# ─── Dev helpers (optional) ───
-black           = {version = "^24.4", optional = true}
-isort           = {version = "^5.13", optional = true}
-ruff            = {version = "^0.4", optional = true}
-pre-commit      = {version = "^3.7", optional = true}
-wandb = "^0.21.0"
+# — Neuron stack —
+torch           = "==2.7.*"           # Torch core used by Neuron 2.x
+optimum-neuron  = {extras = ["neuronx"], version = "^0.3.0"}
+# optional explicit pin, but leaving it out is fine—Optimum installs it
+torch-neuronx   = "^2.7.0"
 
-[tool.poetry.extras]
-cpu   = ["onnxruntime"]
-mac   = ["torch", "onnxruntime"]
-gpu   = ["torch", "onnxruntime-gpu"]       # install matching CUDA wheel manually
-inf1  = ["torch-neuron", "optimum-neuron"] # Inferentia v1
-inf2  = ["torch-neuronx", "optimum-neuron"]# Inferentia v2 / Trainium  ✅ fixed
 
 [build-system]
 requires = ["poetry-core"]

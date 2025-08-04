@@ -26,10 +26,6 @@ If *model_name_or_path* is a directory **and** already contains pre-compiled
 Neuron or ONNX files, they are loaded directly; otherwise the wrapper falls
 back to compiling/exporting on-the-fly (with a console warning because that can
 be slow).
-
-This module purposefully **does not** expose higher-level benchmarking helpers –
-that remains the responsibility of the harness that will call
-`utils.sweep_batch_size()` etc.
 """
 from __future__ import annotations
 
@@ -97,7 +93,13 @@ def _has_bf16(device: DeviceInfo, torch) -> bool:  # type: ignore[name-defined]
         major = torch.cuda.get_device_capability(device.device_id)[0]
         return major >= 8  # Ampere+
     if device.device_type == "cpu":
-        return torch.xpu or hasattr(torch, "bfloat16")  # noqa: SIM118 – simplistic
+        # A simple proxy for determining BF16 support on CPU
+        try:
+            # This will succeed on machines with AVX512_BF16
+            _ = torch.randn(1, dtype=torch.bfloat16)
+            return True
+        except Exception:
+            return False
     if device.device_type == "mps":
         return False
     return False
@@ -168,7 +170,6 @@ def load_encoder(
             logger.warning("Backend does not support bfloat16 – falling back to fp32")
             desired_dtype = torch.float32
 
-        # Choose an *AutoModel* variant – for latency we rarely need heads
         config_path = Path(model_name_or_path) / "config.json" if os.path.isdir(model_name_or_path) else None
         auto_cls = AutoModelForMaskedLM if config_path and "mlm" in config_path.read_text() else AutoModel
         model = auto_cls.from_pretrained(
@@ -177,13 +178,13 @@ def load_encoder(
             torch_dtype=desired_dtype,
         )
         model.to(device.torch_device())
+        model.eval()
 
     elif runtime == "onnx":
         if not _OPTIMUM_ONNX_AVAILABLE:
             raise ImportError("Install `optimum[onnxruntime]` for ONNX support.")
         from optimum.onnxruntime import ORTModelForSequenceClassification
 
-        # If directory already has "model.onnx" use it, otherwise export now
         onnx_dir = Path(model_name_or_path)
         if onnx_dir.is_dir() and (onnx_dir / "model.onnx").exists():
             model = ORTModelForSequenceClassification.from_pretrained(onnx_dir)
@@ -191,11 +192,9 @@ def load_encoder(
             logger.warning("Exporting model to ONNX – this may take a while …")
             model = ORTModelForSequenceClassification.from_pretrained(model_name_or_path, export=True)
             model.save_pretrained("./_exported_onnx")
-            onnx_dir = Path("./_exported_onnx")
 
-        # No explicit *to(device)*, runtime EP selection happens via session opts
         ep_list = ["CUDAExecutionProvider"] if device.device_type == "cuda" else ["CPUExecutionProvider"]
-        model._model.init_session(providers=ep_list)  # type: ignore[attr-defined]
+        model.set_providers(providers=ep_list)
 
     elif runtime == "neuron":
         if not _OPTIMUM_NEURON_AVAILABLE:
@@ -203,22 +202,24 @@ def load_encoder(
         from optimum.neuron import NeuronModelForSequenceClassification
 
         local_dir = Path(model_name_or_path)
-        is_compiled = local_dir.is_dir() and (local_dir / "traced_model.pt").exists()
+        
+        # Check for the modern 'model.neuron' artifact name.
+        is_compiled = local_dir.is_dir() and (local_dir / "model.neuron").exists()
+        
         if is_compiled:
+            logger.info("✅ Found pre-compiled Neuron artifact in %s. Loading directly.", local_dir)
+            # When loading a pre-compiled model, `export` must be False (the default).
             model = NeuronModelForSequenceClassification.from_pretrained(local_dir)
         else:
-            logger.warning("Compiling model for Neuron – this can take several minutes …")
-            model = NeuronModelForSequenceClassification.from_pretrained(
-                model_name_or_path,
-                export=True,
-                auto_cast= dtype if dtype in {"bf16", "fp16"} else None,
+            # The benchmark.py script is responsible for compiling. If we get here and 
+            # the model isn't compiled, it's a workflow error, so we fail fast.
+            raise FileNotFoundError(
+                f"Neuron benchmark requires a pre-compiled model directory, but "
+                f"'model.neuron' was not found in '{local_dir}'. "
+                f"Ensure `benchmark.py` ran its compilation step successfully."
             )
-            model.save_pretrained("./_compiled_neuron")
-            local_dir = Path("./_compiled_neuron")
 
-        # Nothing else to do – Neuron models run via *torch-neuron* under the hood
-
-    else:  # pragma: no cover – unreachable unless we add new runtimes
+    else:
         raise RuntimeError(f"Unknown runtime selected: {runtime}")
 
     return model, tokenizer, runtime
