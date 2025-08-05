@@ -1,0 +1,36 @@
+# pyproject.neuron.toml  –  use ONLY on Inf2 / Trainium
+# -----------------------------------------------------
+
+[[tool.poetry.source]]
+name     = "aws-neuron"
+url      = "https://pip.repos.neuron.amazonaws.com"
+priority = "supplemental"          # keep PyPI as primary; fallback to this repo
+
+[tool.poetry]
+name        = "latency-bench-neuron"
+version     = "0.2.0"
+description = "Latency-bench – Neuron runtime (Torch 1.13 + Neuron SDK 2)"
+authors     = ["Your Name <you@example.com>"]
+packages    = [{ include = "latency_bench", from = "src" }]
+
+[tool.poetry.dependencies]
+python = ">=3.10,<3.13"
+
+# — hardware-agnostic libs —
+datasets   = "^2.19"
+rich       = "^13.7"
+tqdm       = "^4.66"
+psutil     = "^5.9"
+py-cpuinfo = "^9.0"
+wandb      = "^0.21"
+
+# — Neuron stack —
+torch           = "==2.7.*"           # Torch core used by Neuron 2.x
+optimum-neuron  = {extras = ["neuronx"], version = "^0.3.0"}
+# optional explicit pin, but leaving it out is fine—Optimum installs it
+torch-neuronx   = "^2.7.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

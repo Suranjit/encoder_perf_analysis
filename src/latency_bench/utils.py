@@ -32,6 +32,11 @@ __all__ = [
     "sweep_batch_size",
 ]
 
+# Define a reasonable, fixed batch size for hardware execution to avoid OOM errors.
+HARDWARE_EXECUTION_BATCH_SIZE = 256
+# Define the total number of items to simulate for a large batch job on MPS
+MPS_SIMULATED_TOTAL_BATCH_SIZE = 4096
+
 # ---------------------------------------------------------------------------
 # ✨ Data structures
 # ---------------------------------------------------------------------------
@@ -69,14 +74,13 @@ class DeviceInfo:
 
 def _detect_cpu() -> DeviceInfo:
     """Always present – returns a single *DeviceInfo* for the host CPU."""
-
     cpu_info = platform.processor() or platform.machine()
     total_mem_gb = psutil.virtual_memory().total / 1024**3
     return DeviceInfo(
         device_type="cpu",
         name=cpu_info,
         vendor=platform.platform(),
-        backend="torch",  # default engine for CPU
+        backend="torch",
         device_id=None,
         total_memory_gb=round(total_mem_gb, 2),
         arch=platform.machine(),
@@ -85,10 +89,8 @@ def _detect_cpu() -> DeviceInfo:
 
 def _detect_cuda() -> List[DeviceInfo]:
     """Detect *all* CUDA GPUs via PyTorch (if available)."""
-
     if torch is None or not torch.cuda.is_available():
         return []
-
     gpus: List[DeviceInfo] = []
     for idx in range(torch.cuda.device_count()):
         props = torch.cuda.get_device_properties(idx)
@@ -108,12 +110,10 @@ def _detect_cuda() -> List[DeviceInfo]:
 
 def _detect_mps() -> List[DeviceInfo]:
     """Detect Apple Silicon GPUs via the MPS backend."""
-
     if torch is None or not getattr(torch.backends, "mps", None):
         return []
     if not torch.backends.mps.is_available():
         return []
-
     total_mem_gb = psutil.virtual_memory().total / 1024**3
     return [
         DeviceInfo(
@@ -130,14 +130,12 @@ def _detect_mps() -> List[DeviceInfo]:
 
 def _detect_neuron() -> List[DeviceInfo]:
     """Detect AWS Inferentia/Trainium devices if the Neuron SDK is present."""
-
     devices: List[DeviceInfo] = []
-
     if importlib.util.find_spec("torch_neuronx"):
         try:
             import torch_xla.core.xla_model as xm
             if len(xm.get_xla_supported_devices()) > 0:
-                 devices.append(
+                devices.append(
                     DeviceInfo(
                         device_type="inf2",
                         name="AWS Inferentia v2 / Trainium",
@@ -149,31 +147,17 @@ def _detect_neuron() -> List[DeviceInfo]:
         except Exception as e:
             logger.warning("Neuron device detection failed: %s", e)
             pass
-    
-    elif importlib.util.find_spec("torch_neuron"):
-        devices.append(
-            DeviceInfo(
-                device_type="inf1",
-                name="AWS Inferentia v1",
-                vendor="AWS",
-                backend="neuron",
-                device_id=0,
-            )
-        )
     return devices
 
 
 def get_available_devices(refresh: bool = False) -> List[DeviceInfo]:
     """Return and cache the list of *DeviceInfo* objects for this process."""
-
     if not refresh and hasattr(get_available_devices, "_cache"):
         return getattr(get_available_devices, "_cache")
-
     devices: List[DeviceInfo] = [_detect_cpu()]
     devices.extend(_detect_cuda())
     devices.extend(_detect_mps())
     devices.extend(_detect_neuron())
-
     logger.info("Detected %d devices: %s", len(devices), [d.device_type for d in devices])
     setattr(get_available_devices, "_cache", devices)
     return devices
@@ -185,7 +169,6 @@ def get_available_devices(refresh: bool = False) -> List[DeviceInfo]:
 
 def _sync_if_needed(device: DeviceInfo):
     """Call the right backend-specific *synchronize* method (CUDA/MPS)."""
-
     if device.backend != "torch":
         return
     if device.device_type == "cuda":
@@ -194,86 +177,74 @@ def _sync_if_needed(device: DeviceInfo):
         pass
 
 
-def time_single_forward(model, inputs, device: DeviceInfo, warmup: int = 2, repeat: int = 5) -> float:
-    """Return **average latency (ms)** for a single forward pass."""
-
-    if torch is None:
-        raise RuntimeError("PyTorch is required for *time_single_forward*.")
-
-    with torch.no_grad():
-        for _ in range(warmup):
-            _ = model(**inputs)
-        _sync_if_needed(device)
-
-        elapsed: List[float] = []
-        for _ in range(repeat):
-            start = time.perf_counter()
-            _ = model(**inputs)
-            _sync_if_needed(device)
-            elapsed.append(time.perf_counter() - start)
-
-    return sum(elapsed) / len(elapsed) * 1000
-
-
 def sweep_batch_size(
     model, tokenizer, device: DeviceInfo, seq_len: int = 128, batch_sizes: List[int] | None = None
 ) -> Dict[int, float]:
     """
     Sweep over candidate *batch_sizes* and return {bs: latency_ms}.
-    For batch sizes larger than the hardware-compiled batch size (for Neuron),
-    this function simulates a larger batch by running multiple mini-batches.
+    This function contains special logic for MPS to simulate a large job
+    using small, memory-safe mini-batches.
     """
-
     if batch_sizes is None:
-        batch_sizes = [4, 8, 16, 32, 64, 128, 256]
+        batch_sizes = [1, 2, 4, 8, 16, 32]
 
     if torch is None:
         raise RuntimeError("PyTorch is required for *sweep_batch_size*.")
 
-    hardware_batch_size = 256
-    if device.backend == "neuron":
-        hardware_batch_size = model.config.neuron["static_batch_size"]
+    tensor_device = device.torch_device()
+    model.to(tensor_device)
+    model.eval()
 
-    tensor_device = torch.device("cpu") if device.backend == "neuron" else device.torch_device()
-    if device.backend == "torch":
-        model.to(tensor_device)
+    # --- Custom Logic for MPS ---
+    if device.device_type == 'mps':
+        # For MPS, we ignore the user-provided batch sizes to prevent OOM crashes.
+        # Instead, we use a hardcoded list of small, safe batch sizes for the simulation.
+        safe_mps_batch_sizes = [1, 2, 4, 8]
+        logger.info(
+            "  [MPS] Using safe batch sizes %s for simulation.", safe_mps_batch_sizes
+        )
+        batch_sizes_to_run = safe_mps_batch_sizes
+    else:
+        batch_sizes_to_run = batch_sizes
+
 
     results: Dict[int, float] = {}
-    for user_batch_size in batch_sizes:
-        
-        if user_batch_size <= hardware_batch_size:
-            num_mini_batches = 1
+    for user_batch_size in batch_sizes_to_run:
+        # --- Mini-batching logic ---
+        if device.device_type == 'mps':
+            num_mini_batches = math.ceil(MPS_SIMULATED_TOTAL_BATCH_SIZE / user_batch_size)
             current_batch_size = user_batch_size
-        else:
-            num_mini_batches = math.ceil(user_batch_size / hardware_batch_size)
-            current_batch_size = hardware_batch_size
             logger.info(
-                "  Simulating user_batch_size=%d with %d mini-batches of %d",
-                user_batch_size,
+                "  [MPS] Simulating a total job of %d items using %d mini-batches of size %d",
+                MPS_SIMULATED_TOTAL_BATCH_SIZE,
                 num_mini_batches,
                 current_batch_size,
             )
+        else:
+            if user_batch_size <= HARDWARE_EXECUTION_BATCH_SIZE:
+                num_mini_batches = 1
+                current_batch_size = user_batch_size
+            else:
+                num_mini_batches = math.ceil(user_batch_size / HARDWARE_EXECUTION_BATCH_SIZE)
+                current_batch_size = HARDWARE_EXECUTION_BATCH_SIZE
+                logger.info(
+                    "  Simulating user_batch_size=%d with %d mini-batches of %d",
+                    user_batch_size,
+                    num_mini_batches,
+                    current_batch_size,
+                )
 
-        # Create the base inputs required by all models
+        # Create a single dummy input tensor for one mini-batch
         dummy_input_ids = torch.randint(
             low=5, high=tokenizer.vocab_size, size=(current_batch_size, seq_len), dtype=torch.long, device=tensor_device
         )
         attention_mask = torch.ones_like(dummy_input_ids, dtype=torch.long, device=tensor_device)
         
-        inputs = {
-            "input_ids": dummy_input_ids,
-            "attention_mask": attention_mask,
-        }
-
-        # <<< FINAL FIX: Only add token_type_ids if the model expects it.
+        inputs = {"input_ids": dummy_input_ids, "attention_mask": attention_mask}
         if 'token_type_ids' in tokenizer.model_input_names:
-            token_type_ids = torch.zeros_like(dummy_input_ids, dtype=torch.long, device=tensor_device)
-            inputs['token_type_ids'] = token_type_ids
+            inputs['token_type_ids'] = torch.zeros_like(dummy_input_ids, dtype=torch.long, device=tensor_device)
 
         # --- Benchmarking ---
-        if device.backend == "torch":
-            model.eval()
-            
         with torch.no_grad():
             # Warm-up runs
             for _ in range(2):
@@ -291,8 +262,15 @@ def sweep_batch_size(
                 _sync_if_needed(device)
                 total_elapsed += (time.perf_counter() - start)
         
+        # Calculate the average latency for the entire simulated job
         avg_total_latency_ms = (total_elapsed / repeat) * 1000
-        results[user_batch_size] = round(avg_total_latency_ms, 3)
-        logger.info("  - bs=%-4d  →  %.3f ms (total)", user_batch_size, avg_total_latency_ms)
+        
+        # For MPS, we report the result against the simulated total size, but key it by the hardware batch size
+        if device.device_type == 'mps':
+            results[user_batch_size] = round(avg_total_latency_ms, 3)
+            logger.info("  - HW bs=%-4d (Job Size: %d) → %.3f ms (total)", user_batch_size, MPS_SIMULATED_TOTAL_BATCH_SIZE, avg_total_latency_ms)
+        else:
+            results[user_batch_size] = round(avg_total_latency_ms, 3)
+            logger.info("  - bs=%-4d  →  %.3f ms (total)", user_batch_size, avg_total_latency_ms)
 
     return results
